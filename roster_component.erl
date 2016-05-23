@@ -2,13 +2,14 @@
 
 -export([start_link/0, stop/0]).
 
--export([init/1,handle_info/2, terminate/2]).
+-export([init/1,handle_info/2, terminate/2, get_roster/0]).
 
 -import (roster_component_db,[init/0, set_subscription/1, get_subscription/1]).
 
 -include_lib("exmpp/include/exmpp_client.hrl").
 -include_lib("exmpp/include/exmpp_nss.hrl").
 -include_lib("exmpp/include/exmpp_xml.hrl").
+%-include_lib("exmpp/include/exmpp.hrl").
 
 -behaviour(gen_server).
 
@@ -66,9 +67,7 @@ process_received_packet(Session, Packet) ->
         message ->
             process_received_message(Session, Packet);
         presence ->
-            process_received_presence(Session, Packet);
-            K -> io:write(K)
-
+            process_received_presence(Session, Packet)
     end.
 
 process_received_presence(Session, #received_packet{packet_type=presence,
@@ -153,7 +152,7 @@ process_iq(Session, "set", ?NS_INBAND_REGISTER, IQ) ->
 	    {subscribed, UId, _Pwd}-> 
 	        SubscriptionRequest = subscribe_to_presence(Jid),
             exmpp_component:send_packet(Session, SubscriptionRequest),
-            RosterGet0 = exmpp_client_roster:get_roster(),
+            RosterGet0 = get_roster(),
             RosterGet1 = exmpp_xml:set_attribute(RosterGet0,exmpp_xml:attribute(<<"to">>,Jid)),
             RosterGet2 = exmpp_xml:set_attribute(RosterGet1,exmpp_xml:attribute(<<"from">>,?COMPONENT)),
             exmpp_component:send_packet(Session, RosterGet2);
@@ -161,7 +160,12 @@ process_iq(Session, "set", ?NS_INBAND_REGISTER, IQ) ->
 	         ok 
     end;
 
-process_iq(Session, _Type, NS, IQ) ->
+%% case of error
+process_iq(Session, "error", NS, IQ) ->
+    %% print error
+    error_logger:warning_msg("Warning: Roster management is not allowed from this domain ");
+
+process_iq(Session, Type, NS, IQ) ->
     %% set text value of IQ stanza
     Reply = exmpp_xml:element(NS, 'response', [],
                                       [{xmlcdata,<<"your iq has been received">>}]),
@@ -201,3 +205,19 @@ make_presence(JID, Type) ->
     PresenceType = ?XMLATTR(<<"type">>, Type),
     Presence = ?XMLEL4(?NS_COMPONENT_ACCEPT, 'presence', [PresenceType, From], []),
     exmpp_stanza:set_recipient(Presence, JID).
+
+%%=============================================================================
+%% From EXMPP exmpp_client_roster.erl
+%%=============================================================================
+get_roster() ->
+    get_roster(roster_id()).
+
+get_roster(Id) ->
+    Query = #xmlel{ns = ?NS_ROSTER, name = 'query'},
+    Iq = exmpp_xml:set_attributes(
+       #xmlel{ns = undefined, name = 'iq'},
+       [{<<"type">>, "get"}, {<<"id">>, Id}]),
+    exmpp_xml:append_child(Iq, Query).
+
+roster_id() ->
+    "rost-" ++ integer_to_list(random:uniform(65536 * 65536)).
