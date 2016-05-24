@@ -9,7 +9,6 @@
 -include_lib("exmpp/include/exmpp_client.hrl").
 -include_lib("exmpp/include/exmpp_nss.hrl").
 -include_lib("exmpp/include/exmpp_xml.hrl").
-%-include_lib("exmpp/include/exmpp.hrl").
 
 -behaviour(gen_server).
 
@@ -17,6 +16,9 @@
 -define(SERVER_HOST, "localhost").
 -define(SERVER_PORT, 8888).
 -define(SECRET, "secret").
+
+%%-define(?IS_PRIVILEGE(EL), (EL#xmlel.children)).
+
 
 -record(state, {session}).
 
@@ -82,11 +84,25 @@ process_received_presence(Session, #received_packet{packet_type=presence,
 	        mnesia:dirty_write({user_table, BareFrom, Status, UId, Pwd});
 	    _ ->
 	        nothing
-     end.
-
-
+     end.                                     
+      
 process_received_message(Session,
-	               #received_packet{packet_type=message, raw_packet=Packet}) ->
+                         #received_packet{packet_type = message, raw_packet = Packet }) ->
+    Childs = exmpp_xml:get_child_elements(Packet),
+    case Childs of
+        [#xmlel{name = "privilege"} = Child] ->
+            process_message(Session, privilege, Packet);
+        _ -> 
+            process_message(Session, message, Packet)
+    end.
+
+%% TODO : add host and privilege access to state.
+process_message(Session, privilege, Packet) ->
+    io:format("~s\n", [exmpp_xml:document_to_iolist(Packet)]);
+
+    
+
+process_message(Session, message, Packet) ->
     %% retrieve recipient jid
     From = exmpp_xml:get_attribute(Packet, <<"from">>, <<"unknown">>),
     %% retrieve sender jid
