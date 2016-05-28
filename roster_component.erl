@@ -1,8 +1,9 @@
 -module(roster_component).
 
--export([start_link/0, stop/0]).
+-export([start_link/0, stop/0, add_contact/4, subscribe_to_presence/3, 
+         make_presence/3, make_forwarded_message/3]).
 
--export([init/1,handle_info/2, terminate/2, get_roster/0]).
+-export([init/1,handle_info/2, terminate/2, get_roster/0, handle_cast/2]).
 
 -import (roster_component_db,[init/0, set_subscription/1, get_subscription/1]).
 
@@ -17,7 +18,8 @@
 -define(SERVER_PORT, 8888).
 -define(SECRET, "secret").
 
-%%-define(?IS_PRIVILEGE(EL), (EL#xmlel.children)).
+-define(NS_FORWARDED, <<"urn:xmpp:forward:0">>).
+-define(NS_PRIVILEGE, <<"urn:xmpp:privilege:1">>).
 
 
 -record(state, {session}).
@@ -36,7 +38,9 @@ start_link() ->
 stop() ->
 	gen_server:call(?MODULE, stop).
 
-%% roster request
+%% roster set
+add_contact(JidTo, Jid, Groups, Nick) ->
+    gen_server:cast(?MODULE, {add_item, JidTo,Nick, Jid, Groups}).
 
 %%=============================================================================
 %% callback functions
@@ -51,6 +55,17 @@ init([]) ->
 	_StreamId = exmpp_component:connect(Session, ?SERVER_HOST, ?SERVER_PORT),
 	ok = exmpp_component:handshake(Session),
 	{ok, #state{session = Session}}.
+
+handle_cast({add_item,JidTo, Nick, Jid, Groups},  #state{session = Session} = State) ->
+    IQ0 = set_item(Jid, Groups, Nick),
+    IQ1 = exmpp_xml:set_attribute(IQ0,exmpp_xml:attribute(<<"to">>, JidTo)),
+    IQ2 = exmpp_xml:set_attribute(IQ1,exmpp_xml:attribute(<<"from">>,?COMPONENT)),
+    exmpp_component:send_packet(Session, IQ2),
+    %% send presence 
+    SubscriptionRequest = subscribe_to_presence(JidTo,Jid, Nick),
+    Presence = make_forwarded_message(?COMPONENT, <<"localhost">>, SubscriptionRequest),
+    exmpp_component:send_packet(Session, Presence),
+    {noreply, State}.
 
 -spec handle_info(any(), #state{}) -> {noreply, #state{}}.
 handle_info(#received_packet{} = Packet, #state{session = Session} = State) ->
@@ -70,6 +85,7 @@ process_received_packet(Session, Packet) ->
             process_received_message(Session, Packet);
         presence ->
             process_received_presence(Session, Packet)
+            
     end.
 
 process_received_presence(Session, #received_packet{packet_type=presence,
@@ -118,7 +134,12 @@ process_message(Session, message, Packet) ->
 
 process_received_iq(Session,
             #received_packet{packet_type=iq, type_attr=Type, raw_packet=IQ}) ->
-    process_iq(Session,Type, exmpp_xml:get_ns_as_atom(exmpp_iq:get_payload(IQ)),IQ ).
+    case Type of 
+        "result" -> 
+            io:format("~s\n", [exmpp_xml:document_to_iolist(IQ)]);
+        _ ->
+            process_iq(Session,Type, exmpp_xml:get_ns_as_atom(exmpp_iq:get_payload(IQ)),IQ )
+    end.
 
 process_iq(Session, "get", ?NS_DISCO_INFO, IQ) ->
 	Identity =  exmpp_xml:element(?NS_DISCO_INFO, 'identity', 
@@ -178,17 +199,17 @@ process_iq(Session, "set", ?NS_INBAND_REGISTER, IQ) ->
 
 %% case of error
 process_iq(Session, "error", NS, IQ) ->
-    %% print error
-    error_logger:warning_msg("Warning: Roster management is not allowed from this domain ");
+    io:format("~s\n", [exmpp_xml:document_to_iolist(IQ)]);
 
 process_iq(Session, Type, NS, IQ) ->
     %% set text value of IQ stanza
-    Reply = exmpp_xml:element(NS, 'response', [],
-                                      [{xmlcdata,<<"your iq has been received">>}]),
-    %% build result packet
-    Result = exmpp_iq:result(IQ, exmpp_xml:element(NS, 'query', [], [Reply])),
-    %% sends new packet
-    exmpp_component:send_packet(Session, Result).
+    io:format("~s\n", [exmpp_xml:document_to_iolist(IQ)]).
+    % Reply = exmpp_xml:element(NS, 'response', [],
+    %                                   [{xmlcdata,<<"your iq has been received">>}]),
+    % %% build result packet
+    % Result = exmpp_iq:result(IQ, exmpp_xml:element(NS, 'query', [], [Reply])),
+    % %% sends new packet
+    % exmpp_component:send_packet(Session, Result).
 
 send_registration_fields(Session, IQ, NS) ->
     Instructions = exmpp_xml:element(NS, 'instructions', [], [{xmlcdata,
@@ -216,15 +237,49 @@ subscribe_to_presence(JID) ->
     Presence = ?XMLEL4(?NS_USER_NICKNAME, 'nick', [], [CompAddr]),
     exmpp_xml:append_child(make_presence(JID, <<"subscribe">>), Presence).
 
+subscribe_to_presence(JID_FROM, JID_TO, Nick ) ->
+    CompAddr = ?XMLCDATA(Nick),
+    Presence = ?XMLEL4(?NS_USER_NICKNAME, 'nick', [], [CompAddr]),
+    exmpp_xml:append_child(make_presence(JID_FROM,JID_TO, <<"subscribe">>), Presence).
+
 make_presence(JID, Type) ->
     From = ?XMLATTR(<<"from">>, ?COMPONENT),
     PresenceType = ?XMLATTR(<<"type">>, Type),
     Presence = ?XMLEL4(?NS_COMPONENT_ACCEPT, 'presence', [PresenceType, From], []),
     exmpp_stanza:set_recipient(Presence, JID).
 
+make_presence(JID_FROM, JID_TO, Type) ->
+    From = ?XMLATTR(<<"from">>, JID_FROM),
+    PresenceType = ?XMLATTR(<<"type">>, Type),
+    Presence = ?XMLEL4(undefined, 'presence', [PresenceType, From], []),
+    Presence0 = exmpp_stanza:set_recipient(Presence, JID_TO).
+
+make_forwarded_message(JID_FROM, JID_TO, Child) ->
+    From = ?XMLATTR(<<"from">>, JID_FROM),
+    Id = ?XMLATTR(<<"id">>, component_id()),
+    Message = ?XMLEL4(undefined, 'message', [Id, From], []),
+    Message0 = exmpp_stanza:set_recipient(Message, JID_TO),
+    %% privilege element
+    Ns = ?XMLATTR(<<"xmlns">>, ?NS_PRIVILEGE ),
+    Privilege = ?XMLEL4(undefined, 'privilege', [Ns],[]),
+    %% forwarded element
+    Ns0 = ?XMLATTR(<<"xmlns">>, ?NS_FORWARDED),
+    Forwarded = ?XMLEL4(undefined, 'forwarded', [Ns0],[]),
+    %% add stanza to forward
+    Forwarded0 = exmpp_xml:append_child(Forwarded, Child),
+    %% add forwarded to privilege
+    Privilege0 = exmpp_xml:append_child(Privilege, Forwarded0),
+    exmpp_xml:append_child(Message0,Privilege0).
+
+
+
 %%=============================================================================
 %% From EXMPP exmpp_client_roster.erl
 %%=============================================================================
+component_id() ->
+    "comp-" ++ integer_to_list(random:uniform(65536 * 65536)).
+
+
 get_roster() ->
     get_roster(roster_id()).
 
@@ -237,3 +292,21 @@ get_roster(Id) ->
 
 roster_id() ->
     "rost-" ++ integer_to_list(random:uniform(65536 * 65536)).
+
+set_item(ContactJID, Groups, Nick) ->
+    set_item(roster_id(), ContactJID, Groups, Nick).
+
+set_item(Id, ContactJID, Groups, Nick) ->
+    Item = exmpp_xml:set_children(
+        exmpp_xml:set_attributes(
+             #xmlel{name = 'item'},
+             [{<<"jid">>, ContactJID}]),
+        [ exmpp_xml:set_cdata(
+            exmpp_xml:element(?NS_ROSTER, 'group'),
+            Gr) || Gr <- Groups]),
+    Query = #xmlel{ns = ?NS_ROSTER, name = 'query'},
+    Query2 = exmpp_xml:append_child(Query, Item),
+    Iq = exmpp_xml:set_attributes(
+       #xmlel{ns = undefined, name = 'iq'},
+       [{<<"type">>, "set"}, {<<"id">>, Id}]),
+    exmpp_xml:append_child(Iq, Query2).
